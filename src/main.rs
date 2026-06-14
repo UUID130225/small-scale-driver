@@ -88,51 +88,54 @@ impl ScaleDriver {
 }
 
 fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<SerialSettings, Box<dyn std::error::Error>> {
-    let baud_rates = [9600, 4800, 2400, 19200, 115200];
+    let baud_rates = [9600, 4800, 2400, 1200, 19200, 115200];
     let parities = [Parity::None, Parity::Even, Parity::Odd];
     let data_bits = [DataBits::Eight, DataBits::Seven];
+    let stop_bits = [StopBits::One, StopBits::Two];
 
-    println!("Attempting to auto-detect scale settings on {}...", port_name);
+    println!("Attempting to auto-detect scale settings on {} (Extended Scan)...", port_name);
 
     for &baud in &baud_rates {
         for &parity in &parities {
             for &bits in &data_bits {
-                let settings = SerialSettings {
-                    port_name: port_name.to_string(),
-                    baud_rate: baud,
-                    data_bits: bits,
-                    parity,
-                    stop_bits: StopBits::One,
-                };
+                for &stop in &stop_bits {
+                    let settings = SerialSettings {
+                        port_name: port_name.to_string(),
+                        baud_rate: baud,
+                        data_bits: bits,
+                        parity,
+                        stop_bits: stop,
+                    };
 
-                print!("Testing: {} baud, {:?}, {:?}... ", baud, bits, parity);
-                io::stdout().flush()?;
+                    print!("Testing: {} baud, {:?}, {:?}, {:?}... ", baud, bits, parity, stop);
+                    io::stdout().flush()?;
 
-                if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 500) {
-                    // Try a few times because data might be interleaved
-                    for _ in 0..3 {
-                        match driver.try_read_once() {
-                            Ok(Some(weight)) => {
-                                println!("SUCCESS! Detected weight: {}", weight);
-                                return Ok(settings);
-                            }
-                            Ok(None) => {
-                                // Try to see what's actually coming in
-                                let mut buffer: [u8; 32] = [0; 32];
-                                if let Ok(n) = driver.port.read(&mut buffer) {
-                                    if n > 0 {
-                                        let raw = String::from_utf8_lossy(&buffer[..n]);
-                                        print!("[Raw: {}] ", raw.trim().escape_debug());
-                                        io::stdout().flush()?;
+                    if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 500) {
+                        // Try a few times because data might be interleaved
+                        for _ in 0..3 {
+                            match driver.try_read_once() {
+                                Ok(Some(weight)) => {
+                                    println!("SUCCESS! Detected weight: {}", weight);
+                                    return Ok(settings);
+                                }
+                                Ok(None) => {
+                                    // Try to see what's actually coming in
+                                    let mut buffer: [u8; 32] = [0; 32];
+                                    if let Ok(n) = driver.port.read(&mut buffer) {
+                                        if n > 0 {
+                                            let raw = String::from_utf8_lossy(&buffer[..n]);
+                                            print!("[Raw: {}] ", raw.trim().escape_debug());
+                                            io::stdout().flush()?;
+                                        }
                                     }
                                 }
+                                Err(_) => break,
                             }
-                            Err(_) => break,
+                            std::thread::sleep(Duration::from_millis(100));
                         }
-                        std::thread::sleep(Duration::from_millis(100));
                     }
+                    println!("Failed.");
                 }
-                println!("No valid weight found.");
             }
         }
     }
