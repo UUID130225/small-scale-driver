@@ -10,7 +10,7 @@ use std::path::Path;
 const CONFIG_FILE: &str = "config.json";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Precision Scale Driver with Robust Auto-Detection", long_about = None)]
+#[command(author, version, about = "Precision Scale Driver with Scale Factor", long_about = None)]
 struct Args {
     /// Serial port to connect to.
     #[arg(short, long)]
@@ -23,6 +23,10 @@ struct Args {
     /// Force auto-detection
     #[arg(short, long, default_value_t = false)]
     force_detect: bool,
+
+    /// Scale factor to multiply the weight by (e.g., 10.0 if 0.17 should be 1.7)
+    #[arg(short, long, default_value_t = 1.0)]
+    multiplier: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -32,7 +36,11 @@ struct SerialSettings {
     data_bits: DataBits,
     parity: Parity,
     stop_bits: StopBits,
+    #[serde(default = "default_multiplier")]
+    multiplier: f64,
 }
+
+fn default_multiplier() -> f64 { 1.0 }
 
 impl Default for SerialSettings {
     fn default() -> Self {
@@ -42,6 +50,7 @@ impl Default for SerialSettings {
             data_bits: DataBits::Eight,
             parity: Parity::None,
             stop_bits: StopBits::One,
+            multiplier: 1.0,
         }
     }
 }
@@ -105,13 +114,13 @@ fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<Ser
                         data_bits: bits,
                         parity,
                         stop_bits: stop,
+                        multiplier: 1.0,
                     };
 
                     print!("Testing: {} baud, {:?}, {:?}, {:?}... ", baud, bits, parity, stop);
                     io::stdout().flush()?;
 
                     if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 500) {
-                        // Try a few times because data might be interleaved
                         for _ in 0..3 {
                             match driver.try_read_once() {
                                 Ok(Some(weight)) => {
@@ -119,7 +128,6 @@ fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<Ser
                                     return Ok(settings);
                                 }
                                 Ok(None) => {
-                                    // Try to see what's actually coming in
                                     let mut buffer: [u8; 32] = [0; 32];
                                     if let Ok(n) = driver.port.read(&mut buffer) {
                                         if n > 0 {
@@ -173,28 +181,33 @@ fn save_config(settings: &SerialSettings) -> Result<(), Box<dyn std::error::Erro
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let settings = if !args.force_detect {
+    let mut settings = if !args.force_detect {
         if let Some(config) = load_config() {
             println!("Loaded existing configuration for {}.", config.port_name);
             config
         } else {
             let port_name = args.port.clone().unwrap_or(select_port()?);
-            let detected = auto_detect_settings(&port_name, &args.command)?;
+            let mut detected = auto_detect_settings(&port_name, &args.command)?;
+            detected.multiplier = args.multiplier;
             save_config(&detected)?;
             println!("Configuration saved to {}.", CONFIG_FILE);
             detected
         }
     } else {
         let port_name = args.port.clone().unwrap_or(select_port()?);
-        let detected = auto_detect_settings(&port_name, &args.command)?;
+        let mut detected = auto_detect_settings(&port_name, &args.command)?;
+        detected.multiplier = args.multiplier;
         save_config(&detected)?;
         detected
     };
 
-    let mut driver = ScaleDriver::open(&settings, args.command, 1000)?;
-    println!("\nMonitoring weight (Press Ctrl+C to exit)...");
+    if args.multiplier != 1.0 {
+        settings.multiplier = args.multiplier;
+    }
 
-    // For monitoring, we use BufReader for cleaner line-based output
+    let driver = ScaleDriver::open(&settings, args.command, 1000)?;
+    println!("\nMonitoring weight with multiplier: {}x (Press Ctrl+C to exit)...", settings.multiplier);
+
     let mut reader = BufReader::new(driver.port);
     loop {
         let mut line = String::new();
@@ -202,17 +215,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(_) => {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    print!("[Raw Data: {}] -> ", trimmed.escape_debug());
-                    io::stdout().flush()?;
-                    
                     if let Some(mat) = driver.re.find(&line) {
                         if let Ok(weight) = mat.as_str().parse::<f64>() {
-                            println!("Parsed Weight: {:.3}", weight);
-                        } else {
-                            println!("Failed to parse number.");
+                            let adjusted_weight = weight * settings.multiplier;
+                            println!("Weight: {:.3}", adjusted_weight);
                         }
-                    } else {
-                        println!("No number found.");
                     }
                 }
             }
