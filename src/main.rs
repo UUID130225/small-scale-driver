@@ -200,9 +200,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(_) => {
-                if let Some(mat) = driver.re.find(&line) {
-                    if let Ok(weight) = mat.as_str().parse::<f64>() {
-                        println!("Current Weight: {:.3}", weight);
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    print!("[Raw Data: {}] -> ", trimmed.escape_debug());
+                    io::stdout().flush()?;
+                    
+                    if let Some(mat) = driver.re.find(&line) {
+                        if let Ok(weight) = mat.as_str().parse::<f64>() {
+                            println!("Parsed Weight: {:.3}", weight);
+                        } else {
+                            println!("Failed to parse number.");
+                        }
+                    } else {
+                        println!("No number found.");
                     }
                 }
             }
