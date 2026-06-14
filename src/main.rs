@@ -53,9 +53,9 @@ struct ScaleDriver {
 }
 
 impl ScaleDriver {
-    fn open(settings: &SerialSettings, command: Option<String>) -> Result<Self, Box<dyn std::error::Error>> {
+    fn open(settings: &SerialSettings, command: Option<String>, timeout_ms: u64) -> Result<Self, Box<dyn std::error::Error>> {
         let port = serialport::new(&settings.port_name, settings.baud_rate)
-            .timeout(Duration::from_millis(1000))
+            .timeout(Duration::from_millis(timeout_ms))
             .data_bits(settings.data_bits)
             .parity(settings.parity)
             .stop_bits(settings.stop_bits)
@@ -107,7 +107,7 @@ fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<Ser
     let parities = [Parity::None, Parity::Even, Parity::Odd];
     let data_bits = [DataBits::Eight, DataBits::Seven];
 
-    println!("Attempting to auto-detect scale settings on {}...", port_name);
+    println!("Attempting to auto-detect scale settings on {} (Fast Scan)...", port_name);
 
     for &baud in &baud_rates {
         for &parity in &parities {
@@ -123,13 +123,11 @@ fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<Ser
                 print!("Testing: {} baud, {:?}, {:?}... ", baud, bits, parity);
                 io::stdout().flush()?;
 
-                if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone()) {
-                    for _ in 0..3 {
-                        if let Ok(Some(weight)) = driver.try_read_weight() {
-                            println!("SUCCESS! Detected weight: {}", weight);
-                            return Ok(settings);
-                        }
-                        std::thread::sleep(Duration::from_millis(200));
+                // Use a very short timeout (200ms) for fast scanning
+                if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 200) {
+                    if let Ok(Some(weight)) = driver.try_read_weight() {
+                        println!("SUCCESS! Detected weight: {}", weight);
+                        return Ok(settings);
                     }
                 }
                 println!("Failed.");
@@ -173,7 +171,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         detected
     };
 
-    let mut driver = ScaleDriver::open(&settings, args.command)?;
+    // Use a standard 1000ms timeout for the main monitoring loop
+    let mut driver = ScaleDriver::open(&settings, args.command, 1000)?;
     println!("\nMonitoring weight (Press Ctrl+C to exit)...");
 
     loop {
