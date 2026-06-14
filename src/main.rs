@@ -1,6 +1,6 @@
 use clap::Parser;
 use serialport::{SerialPort, DataBits, Parity, StopBits};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write, Read};
 use std::time::Duration;
 use regex::Regex;
 use serde::{Serialize, Deserialize};
@@ -10,9 +10,9 @@ use std::path::Path;
 const CONFIG_FILE: &str = "config.json";
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Precision Scale Driver with Config Persistence", long_about = None)]
+#[command(author, version, about = "Precision Scale Driver with Robust Auto-Detection", long_about = None)]
 struct Args {
-    /// Serial port to connect to. If omitted, the program will scan or use config.
+    /// Serial port to connect to.
     #[arg(short, long)]
     port: Option<String>,
 
@@ -20,7 +20,7 @@ struct Args {
     #[arg(short, long)]
     command: Option<String>,
 
-    /// Force auto-detection even if config exists
+    /// Force auto-detection
     #[arg(short, long, default_value_t = false)]
     force_detect: bool,
 }
@@ -47,7 +47,7 @@ impl Default for SerialSettings {
 }
 
 struct ScaleDriver {
-    reader: BufReader<Box<dyn SerialPort>>,
+    port: Box<dyn SerialPort>,
     re: Regex,
     command: Option<String>,
 }
@@ -62,21 +62,21 @@ impl ScaleDriver {
             .open()?;
 
         let re = Regex::new(r"[-+]?[0-9]*\.?[0-9]+")?;
-        let reader = BufReader::new(port);
 
-        Ok(ScaleDriver { reader, re, command })
+        Ok(ScaleDriver { port, re, command })
     }
 
-    fn try_read_weight(&mut self) -> Result<Option<f64>, Box<dyn std::error::Error>> {
+    fn try_read_once(&mut self) -> Result<Option<f64>, Box<dyn std::error::Error>> {
         if let Some(ref cmd) = self.command {
             let cmd_with_newline = format!("{}\r\n", cmd);
-            self.reader.get_mut().write_all(cmd_with_newline.as_bytes())?;
+            let _ = self.port.write_all(cmd_with_newline.as_bytes());
         }
 
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(_) => {
-                if let Some(mat) = self.re.find(&line) {
+        let mut buffer: [u8; 256] = [0; 256];
+        match self.port.read(&mut buffer) {
+            Ok(bytes_read) => {
+                let data = String::from_utf8_lossy(&buffer[..bytes_read]);
+                if let Some(mat) = self.re.find(&data) {
                     return Ok(mat.as_str().parse().ok());
                 }
                 Ok(None)
@@ -87,27 +87,12 @@ impl ScaleDriver {
     }
 }
 
-fn load_config() -> Option<SerialSettings> {
-    if Path::new(CONFIG_FILE).exists() {
-        let content = fs::read_to_string(CONFIG_FILE).ok()?;
-        serde_json::from_str(&content).ok()
-    } else {
-        None
-    }
-}
-
-fn save_config(settings: &SerialSettings) -> Result<(), Box<dyn std::error::Error>> {
-    let content = serde_json::to_string_pretty(settings)?;
-    fs::write(CONFIG_FILE, content)?;
-    Ok(())
-}
-
 fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<SerialSettings, Box<dyn std::error::Error>> {
     let baud_rates = [9600, 4800, 2400, 19200, 115200];
     let parities = [Parity::None, Parity::Even, Parity::Odd];
     let data_bits = [DataBits::Eight, DataBits::Seven];
 
-    println!("Attempting to auto-detect scale settings on {} (Fast Scan)...", port_name);
+    println!("Attempting to auto-detect scale settings on {}...", port_name);
 
     for &baud in &baud_rates {
         for &parity in &parities {
@@ -123,18 +108,27 @@ fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<Ser
                 print!("Testing: {} baud, {:?}, {:?}... ", baud, bits, parity);
                 io::stdout().flush()?;
 
-                // Use a very short timeout (200ms) for fast scanning
-                if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 200) {
-                    if let Ok(Some(weight)) = driver.try_read_weight() {
-                        println!("SUCCESS! Detected weight: {}", weight);
-                        return Ok(settings);
+                if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 300) {
+                    // Try a few times because data might be interleaved
+                    for _ in 0..5 {
+                        match driver.try_read_once() {
+                            Ok(Some(weight)) => {
+                                println!("SUCCESS! Detected weight: {}", weight);
+                                return Ok(settings);
+                            }
+                            Ok(None) => {
+                                // Data received but no number found, maybe garbage or wrong settings
+                            }
+                            Err(_) => break,
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
                     }
                 }
-                println!("Failed.");
+                println!("No valid data.");
             }
         }
     }
-    Err("Could not auto-detect settings.".into())
+    Err("Could not auto-detect settings. Is the scale connected and sending data?".into())
 }
 
 fn select_port() -> Result<String, Box<dyn std::error::Error>> {
@@ -148,6 +142,21 @@ fn select_port() -> Result<String, Box<dyn std::error::Error>> {
     io::stdin().read_line(&mut input)?;
     let index: usize = input.trim().parse()?;
     if index < ports.len() { Ok(ports[index].port_name.clone()) } else { Err("Invalid selection".into()) }
+}
+
+fn load_config() -> Option<SerialSettings> {
+    if Path::new(CONFIG_FILE).exists() {
+        let content = fs::read_to_string(CONFIG_FILE).ok()?;
+        serde_json::from_str(&content).ok()
+    } else {
+        None
+    }
+}
+
+fn save_config(settings: &SerialSettings) -> Result<(), Box<dyn std::error::Error>> {
+    let content = serde_json::to_string_pretty(settings)?;
+    fs::write(CONFIG_FILE, content)?;
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -171,19 +180,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         detected
     };
 
-    // Use a standard 1000ms timeout for the main monitoring loop
     let mut driver = ScaleDriver::open(&settings, args.command, 1000)?;
     println!("\nMonitoring weight (Press Ctrl+C to exit)...");
 
+    // For monitoring, we use BufReader for cleaner line-based output
+    let mut reader = BufReader::new(driver.port);
     loop {
-        match driver.try_read_weight() {
-            Ok(Some(weight)) => println!("Current Weight: {:.3}", weight),
-            Ok(None) => {},
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(_) => {
+                if let Some(mat) = driver.re.find(&line) {
+                    if let Ok(weight) = mat.as_str().parse::<f64>() {
+                        println!("Current Weight: {:.3}", weight);
+                    }
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {},
             Err(e) => {
                 eprintln!("Error: {}. Re-attempting...", e);
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
