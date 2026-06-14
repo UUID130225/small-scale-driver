@@ -108,23 +108,31 @@ fn auto_detect_settings(port_name: &str, command: &Option<String>) -> Result<Ser
                 print!("Testing: {} baud, {:?}, {:?}... ", baud, bits, parity);
                 io::stdout().flush()?;
 
-                if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 300) {
+                if let Ok(mut driver) = ScaleDriver::open(&settings, command.clone(), 500) {
                     // Try a few times because data might be interleaved
-                    for _ in 0..5 {
+                    for _ in 0..3 {
                         match driver.try_read_once() {
                             Ok(Some(weight)) => {
                                 println!("SUCCESS! Detected weight: {}", weight);
                                 return Ok(settings);
                             }
                             Ok(None) => {
-                                // Data received but no number found, maybe garbage or wrong settings
+                                // Try to see what's actually coming in
+                                let mut buffer: [u8; 32] = [0; 32];
+                                if let Ok(n) = driver.port.read(&mut buffer) {
+                                    if n > 0 {
+                                        let raw = String::from_utf8_lossy(&buffer[..n]);
+                                        print!("[Raw: {}] ", raw.trim().escape_debug());
+                                        io::stdout().flush()?;
+                                    }
+                                }
                             }
                             Err(_) => break,
                         }
-                        std::thread::sleep(Duration::from_millis(50));
+                        std::thread::sleep(Duration::from_millis(100));
                     }
                 }
-                println!("No valid data.");
+                println!("No valid weight found.");
             }
         }
     }
